@@ -1,11 +1,11 @@
 import os
 import json
 import threading
-from typing import Any
-import httpx
+import asyncio
+from datetime import date,timedelta
 from requests_oauthlib import OAuth2Session
 from mcp.server.fastmcp import FastMCP
-from requests.auth import HTTPBasicAuth
+from pathlib import Path
 import requests
 from fastapi import FastAPI, Request
 import uvicorn
@@ -21,6 +21,7 @@ mcp = FastMCP("health")
 # -------------------
 OURA_AUTH_URL = "https://cloud.ouraring.com/oauth/authorize"
 OURA_TOKEN_URL = "https://api.ouraring.com/oauth/token"
+OURA_API_BASE = "https://api.ouraring.com/v2/usercollection"
 
 OURA_CLIENT_ID = os.environ.get("OURA_CLIENT_ID")
 OURA_CLIENT_SECRET = os.environ.get("OURA_CLIENT_SECRET")
@@ -28,23 +29,59 @@ REDIRECT_URI = os.environ.get("OURA_REDIRECT_URI", "http://localhost:8080/callba
 
 SCOPES = ["daily", "heartrate", "workout","personal"]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TOKEN_PATH = os.path.join(BASE_DIR, "oura_token.json")
-STATE_PATH = os.path.join(BASE_DIR, "oura_state.txt")
+
+BASE_DIR = Path(__file__).resolve().parent
+TOKEN_PATH = BASE_DIR / "oura_token.json"
+STATE_PATH = BASE_DIR / "oura_state.txt"
+
+# -------------------
+# OURA API URL Helpers
+# -------------------
+
+def invalid_date(dt: str)-> bool:
+    """Validates whether the given string is an ISO8601 date
+            Args:
+                dt -> str - The date string we are trying to verify
+    """
+    try:
+        date.fromisoformat(dt)
+    except:
+        return True
+    return False
+
+def prep_dates(start_date:str, end_date:str):
+    """Performs validation on dates and returns default dates if validation fails
+            Args:
+                start_date -
+                end_date   -
+    """
+    today = date.today()
+    if invalid_date(end_date) or invalid_date(start_date) is None:
+        end_date = today
+        start_date=end_date-timedelta(days=6)
+        end_date=end_date.isoformat()
+        start_date=start_date.isoformat()
+    return start_date,end_date
+
+def date_url(extn: str ,start_date:str, end_date:str):
+    """Gets any Oura API URL that requires a start date and an end date
+            Args:
+                [TODO: fill in]
+       """
+    start_date,end_date=prep_dates(start_date,end_date)
+    return f"{OURA_API_BASE}/{extn}?start_date={start_date}&end_date={end_date}"
 
 # -------------------
 # TOKEN STORAGE
 # -------------------
 
 def save_token(token: dict):
-    with open(TOKEN_PATH, "w") as f:
-        json.dump(token, f)
+    TOKEN_PATH.write_text(json.dumps(token))
 
 def load_token() -> dict | None:
-    if not os.path.exists(TOKEN_PATH):
+    if not TOKEN_PATH.exists():
         return None
-    with open(TOKEN_PATH, "r") as f:
-        return json.load(f)
+    return json.loads(TOKEN_PATH.read_text())
 
 # -------------------
 # OAUTH SESSION
@@ -89,47 +126,43 @@ def process_oura_callback(code: str, state: str):
 # -------------------
 # OURA REQUEST HELPER
 # -------------------
-async def make_oura_request(url: str) -> dict[str, Any] | None:
+async def make_oura_request(url: str) -> dict:
+    """ Async wrapper for Oura request"""
+    return await asyncio.to_thread(sync_oura_get, url) 
+
+
+def sync_oura_get(url:str) -> dict:
+    """ Helper API call to make authenticated calls to Oura"""
     token = load_token()
     if not token:
         return {"error": "User not authenticated. Run get_oura_login_url first."}
 
     oauth = get_oura_oauth_session(token=token)
 
-    signed_headers = {
-        "Authorization": f"Bearer {oauth.token['access_token']}"
-    }
+    resp = oauth.get(url, timeout=30)
 
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, headers=signed_headers, timeout=30)
+    if resp.status_code == 401:
+        new_token = oauth.refresh_token(
+            OURA_TOKEN_URL,
+            client_id=OURA_CLIENT_ID,
+            client_secret=OURA_CLIENT_SECRET,
+        )
+        save_token(new_token)
+        resp = oauth.get(url, timeout=30)
 
-            # DEBUG (stderr only)
-            import sys
-            print("Oura API Response:", response.status_code, response.text, file=sys.stderr)
+    if resp.status_code == 429:
+        return {"error": "rate_limited", "message": resp.text}
 
+    resp.raise_for_status()
+    return resp.json()
 
-            # If unauthorized → refresh token automatically
-            if response.status_code == 401:
-                token = oauth.refresh_token(
-                    OURA_TOKEN_URL,
-                    client_id=OURA_CLIENT_ID,
-                    client_secret=OURA_CLIENT_SECRET,
-                )
-                save_token(token)
-                response = await client.get(
-                    url,
-                    headers={"Authorization": f"Bearer {token['access_token']}"}
-                )
-
-            response.raise_for_status()
-            try:
-                return response.json()
-            except Exception:
-                return {"error": "Invalid JSON from Oura", "raw": response.text}
-
-        except Exception as e:
-            return {"error": str(e)}
+# -------------------
+# TOOL: Today's date
+# -------------------
+@mcp.tool()
+def get_today_date() -> str:
+    """Retrieves today's date... Claude is a bit dumb here."""
+    return date.today().isoformat()
 
 # -------------------
 # TOOL: LOGIN URL
@@ -146,32 +179,105 @@ def get_oura_login_url() -> str:
     return authorization_url
 
 # -------------------
-# TOOL: DAILY READINES
+# TOOL: DAILY READINESS
 # -------------------
 @mcp.tool()
-async def get_oura_daily_readiness() -> str:
-    """Fetch Oura Daily Readiness Score."""
+async def get_oura_daily_readiness(start_date : str|None = None, end_date : str | None = None) -> dict:
+    """Fetch Oura Daily Readiness Information. Defaults to the last week's information.
 
-    url = "https://api.ouraring.com/v2/usercollection/daily_readiness?start_date=2025-12-01&end_date=2025-12-06"
+        Args:
+            start_date : str - Start date of the query. Must be formatted as YYYY-MM-DD
+            end_date   : str - End date of the query. Must be formatted as YYYY-MM-DD
+        
+        Constraints:
+            end_date must be after the start_date
+    """
+
+    url = date_url("daily_readiness",start_date,end_date)
     data = await make_oura_request(url)
 
     if not data or "data" not in data:
-        return f"Unable to fetch Oura daily summary: {data}"
+        return f"Unable to fetch Oura daily readiness summary: {data}"
 
-    summaries = []
-    for day in data["data"]:
-        summaries.append(
-            f"Date: {day.get('day')}\n"
-            f"Readiness Score: {day.get('score')}\n"
-        )
+    return {
+        "readiness" : [
+            {
+                "date" : day.get("day",None),
+                "score": day.get("score",None)
+            }
+            for day in data["data"]
+        ]
+    }
+# -------------------
+# TOOL: DAILY SLEEP
+# -------------------
+@mcp.tool()
+async def get_oura_daily_sleep(start_date : str|None = None, end_date : str | None = None) -> dict:
+    """Fetch Oura Daily Sleep Information. Defaults to the last week's information.
 
-    return "\n\n---\n\n".join(summaries)
+        Args:
+            start_date : str - Start date of the query. Must be formatted as YYYY-MM-DD
+            end_date   : str - End date of the query. Must be formatted as YYYY-MM-DD
+        
+        Constraints:
+            end_date must be after the start_date
+    """
 
+    url = date_url("daily_sleep",start_date,end_date)
+    data = await make_oura_request(url)
+
+    if not data or "data" not in data:
+        return f"Unable to fetch Oura daily sleep summary: {data}"
+
+    return {
+        "sleep" : [
+            {
+                "date" : day.get("day",None),
+                "score": day.get("score",None)
+            }
+            for day in data["data"]
+        ]
+    }
+
+# -------------------
+# TOOL: DAILY ACTIVITY
+# -------------------
+@mcp.tool()
+async def get_oura_daily_activity(start_date : str|None = None, end_date : str | None = None) -> dict:
+    """Fetch Oura Daily Activity Information. Defaults to the last week's information.
+
+        Args:
+            start_date : str - Start date of the query. Must be formatted as YYYY-MM-DD
+            end_date   : str - End date of the query. Must be formatted as YYYY-MM-DD
+        
+        Constraints:
+            end_date must be after the start_date
+    """
+
+    url = date_url("daily_activity",start_date,end_date)
+    data = await make_oura_request(url)
+
+    if not data or "data" not in data:
+        return f"Unable to fetch Oura daily activity summary: {data}"
+
+    return {
+        "activity" : [
+            {
+                "date" : day.get("day",None),
+                "score": day.get("score",None)
+            }
+            for day in data["data"]
+        ]
+    }
+
+# -------------------
+# CALLBACK SERVER
+# -------------------
 app = FastAPI()
 
 @app.get("/callback")
 async def callback(request: Request):
-
+    """Defines callback server API"""
     code = request.query_params.get("code")
     state = request.query_params.get("state")
 
@@ -182,6 +288,7 @@ async def callback(request: Request):
         return {"error": str(e)}
 
 def start_callback_server():
+    """Spins up callback server"""
     uvicorn.run(app, 
                 host="127.0.0.1", 
                 port=8080, 
