@@ -44,12 +44,11 @@ def get_url_from_cat(cat: str) -> str | None:
     """Returns associated url (extension) given the score category
     
     Args:
-            cat (str)   : One of "readiness","sleep" or "activity".
+        cat (str): One of "readiness","sleep" or "activity".
     
     Returns:
-            str|None    : The associated url extention to retrieve the score from the Oura API. 
-                            None if invalid parameter
-    
+        str|None: The associated url extension to retrieve the score from the Oura API. 
+                  None if invalid parameter
     """
     if cat=="readiness":
         return "daily_readiness"
@@ -61,9 +60,13 @@ def get_url_from_cat(cat: str) -> str | None:
     return None
 
 def invalid_date(dt: str)-> bool:
-    """Validates whether the given string is an ISO8601 date
-            Args:
-                dt -> str - The date string we are trying to verify
+    """Checks if the given string is a valid ISO8601 date.
+    
+    Args:
+        dt (str): The date string to verify.
+    
+    Returns:
+        bool: True if invalid, False if valid.
     """
     try:
         date.fromisoformat(dt)
@@ -72,10 +75,14 @@ def invalid_date(dt: str)-> bool:
     return False
 
 def prep_dates(start_date:str|None, end_date:str|None):
-    """Performs validation on dates and returns default dates if validation fails
-            Args:
-                start_date (str)
-                end_date   )str
+    """Validates and prepares start and end dates. If invalid, defaults to last 7 days.
+    
+    Args:
+        start_date (str|None): Start date string in ISO8601 format.
+        end_date (str|None): End date string in ISO8601 format.
+    
+    Returns:
+        tuple: (start_date, end_date) as ISO8601 strings.
     """
     today = date.today()
     if invalid_date(end_date) or invalid_date(start_date):
@@ -86,10 +93,16 @@ def prep_dates(start_date:str|None, end_date:str|None):
     return start_date,end_date
 
 def date_url(extn: str ,start_date:str|None, end_date:str|None):
-    """Gets any Oura API URL that requires a start date and an end date
-            Args:
-                [TODO: fill in]
-       """
+    """Constructs an Oura API URL requiring start and end dates.
+    
+    Args:
+        extn (str): API endpoint extension.
+        start_date (str|None): Start date in ISO8601 format.
+        end_date (str|None): End date in ISO8601 format.
+    
+    Returns:
+        str: Full API URL with date parameters.
+    """
     start_date,end_date=prep_dates(start_date,end_date)
     return f"{OURA_API_BASE}/{extn}?start_date={start_date}&end_date={end_date}"
 
@@ -98,15 +111,14 @@ def date_url(extn: str ,start_date:str|None, end_date:str|None):
 # -------------------
 
 def process_daily_x_to_json(cat:str, data : dict) -> dict:
-    """ Processes the JSON retrieved from our call to the Oura API to desired MCP Client input
+    """Processes the JSON retrieved from the Oura API to desired MCP Client input.
     
     Args:
-            cat (str)   : One of "readiness", "sleep" or "activity"
-            data (dict) : The JSON returned by our call to OURAs daily APIs
+        cat (str): One of "readiness", "sleep" or "activity".
+        data (dict): The JSON returned by Oura's daily APIs.
     
     Returns:
-            dict        : JSON input for the MCP Client
-
+        dict: JSON input for the MCP Client.
     """
     if cat == "readiness":
         return process_daily_readiness_to_json(data)
@@ -192,20 +204,18 @@ def process_daily_activity_to_json(data : dict) -> dict:
 # -------------------
 
 def save_token(token: dict):
-    """Saves the provided token to TOKEN_PATH
+    """Saves the provided OAuth token to disk at TOKEN_PATH.
     
     Args:
-            token (dict) : Token to be saved locally
-    
+        token (dict): Token to be saved locally.
     """
     TOKEN_PATH.write_text(json.dumps(token))
 
 def load_token() -> dict | None:
-    """Loads the saved token from TOKEN_PATH
+    """Loads the saved OAuth token from TOKEN_PATH.
     
     Returns:
-            dict|None   : The token stored in TOKEN_PATH. None if one does not exist
-    
+        dict|None: The token stored in TOKEN_PATH, or None if not found.
     """
     if not TOKEN_PATH.exists():
         return None
@@ -215,6 +225,15 @@ def load_token() -> dict | None:
 # OAUTH SESSION
 # -------------------
 def get_oura_oauth_session(token=None, auto_refresh=True):
+    """Returns an Oura OAuth2 authenticated session.
+    
+    Args:
+        token (dict|None): Existing token, if any.
+        auto_refresh (bool): Whether to enable auto-refresh of tokens.
+    
+    Returns:
+        OAuth2Session: Authenticated OAuth2 session for Oura API.
+    """
     extra = {"client_id": OURA_CLIENT_ID, "client_secret": OURA_CLIENT_SECRET}
 
     return OAuth2Session(
@@ -228,6 +247,18 @@ def get_oura_oauth_session(token=None, auto_refresh=True):
     )
 
 def process_oura_callback(code: str, state: str):
+    """Processes the OAuth callback, exchanges code for token, and saves it.
+    
+    Args:
+        code (str): Authorization code from Oura.
+        state (str): State parameter to validate against CSRF.
+    
+    Returns:
+        str: Success message if authentication is successful.
+    
+    Raises:
+        Exception: If state is invalid or token exchange fails.
+    """
     saved_state = open(STATE_PATH).read().strip()
     if state != saved_state:
         raise Exception("Invalid OAuth state")
@@ -255,12 +286,26 @@ def process_oura_callback(code: str, state: str):
 # OURA REQUEST HELPER
 # -------------------
 async def make_oura_request(url: str) -> dict:
-    """ Async wrapper for Oura request"""
+    """Async wrapper for making an authenticated Oura API request.
+    
+    Args:
+        url (str): The Oura API endpoint URL.
+    
+    Returns:
+        dict: The JSON response from the Oura API.
+    """
     return await asyncio.to_thread(sync_oura_get, url)
 
 
 def sync_oura_get(url:str) -> dict:
-    """ Helper API call to make authenticated calls to Oura"""
+    """Makes a synchronous authenticated GET request to the Oura API.
+    
+    Args:
+        url (str): The Oura API endpoint URL.
+    
+    Returns:
+        dict: The JSON response from the Oura API, or error message.
+    """
     token = load_token()
     if not token:
         return {"error": "User not authenticated. Run get_oura_login_url first."}
@@ -288,9 +333,11 @@ def sync_oura_get(url:str) -> dict:
 # TOOL: Today's date
 # -------------------
 @mcp.tool()
-def get_today_date() -> str:
+def get_today_date() -> dict:
     """Retrieves today's date... Claude is a bit dumb here."""
-    return date.today().isoformat()
+    return {
+        "today": date.today().isoformat()
+    }
 
 # -------------------
 # TOOL: LOGIN URL
@@ -312,8 +359,16 @@ def get_oura_login_url() -> str:
 
 async def internal_get_daily_x(cat:str, url_extn:str, start_date:str|None, end_date: str|None) \
     -> dict:
-    """ Helper function score information from Oura from category cat
+    """Helper function to fetch daily score information from Oura for a given category.
     
+    Args:
+        cat (str): Category ("readiness", "sleep", or "activity").
+        url_extn (str): API endpoint extension.
+        start_date (str|None): Start date in ISO8601 format.
+        end_date (str|None): End date in ISO8601 format.
+    
+    Returns:
+        dict: Processed daily data or error message.
     """
     url = date_url(url_extn,start_date,end_date)
     data = await make_oura_request(url)
@@ -365,6 +420,8 @@ async def get_oura_daily_x_score(cat:str, start_date : str|None = None, \
 # TOOL: TODO: Various other dailies.
 # -------------------
 
+# TODO: documentation and readme
+
 # -------------------
 # CALLBACK SERVER
 # -------------------
@@ -383,7 +440,7 @@ async def callback(request: Request):
         return {"error": str(e)}
 
 def start_callback_server():
-    """Spins up callback server"""
+    """Starts the FastAPI callback server for OAuth redirection handling."""
     uvicorn.run(app,
                 host="127.0.0.1",
                 port=8080,
@@ -394,7 +451,7 @@ def start_callback_server():
 # RUN EVERYTHING
 # -------------------
 def main():
-    """Spins up callback and MCP servers"""
+    """Starts the callback server in a background thread and runs the MCP server in the foreground."""
     # Start callback HTTP server in background thread
     threading.Thread(target=start_callback_server, daemon=True).start()
 
